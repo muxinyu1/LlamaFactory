@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from transformers import Seq2SeqTrainer
 from typing_extensions import override
 
@@ -148,7 +149,59 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         return super()._get_train_sampler(*args, **kwargs)
 
     @override
+    def _set_signature_columns_if_needed(self) -> None:
+        set_signature_columns_fn = getattr(super(), "_set_signature_columns_if_needed", None)
+        if callable(set_signature_columns_fn):
+            set_signature_columns_fn()
+        else:
+            return
+
+        if self._signature_columns is not None and "sample_weight" not in self._signature_columns:
+            self._signature_columns += ["sample_weight"]
+
+    def _compute_weighted_sft_loss(
+        self, logits: "torch.Tensor", labels: "torch.Tensor", sample_weight: "torch.Tensor"
+    ) -> "torch.Tensor":
+        shift_logits = logits[..., :-1, :].contiguous().float()
+        shift_labels = labels[..., 1:].contiguous().to(shift_logits.device)
+
+        if sample_weight.dim() != 1:
+            sample_weight = sample_weight.view(-1)
+
+        if sample_weight.size(0) != shift_labels.size(0):
+            raise ValueError(
+                f"sample_weight batch size mismatch, got {sample_weight.size(0)} and {shift_labels.size(0)}."
+            )
+
+        per_token_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=IGNORE_INDEX,
+            reduction="none",
+            label_smoothing=getattr(self.args, "label_smoothing_factor", 0.0),
+        ).view(shift_labels.size(0), -1)
+        valid_mask = shift_labels.ne(IGNORE_INDEX)
+        valid_lens = valid_mask.sum(dim=-1)
+        sample_loss = (per_token_loss * valid_mask).sum(dim=-1) / valid_lens.clamp_min(1)
+
+        weight = sample_weight.to(sample_loss.device, dtype=sample_loss.dtype)
+        weight = weight * valid_lens.gt(0).to(weight.dtype)
+        denom = weight.sum().clamp_min(torch.finfo(sample_loss.dtype).eps)
+        return (sample_loss * weight).sum() / denom
+
+    @override
     def compute_loss(self, model, inputs, *args, **kwargs):
+        return_outputs = kwargs.get("return_outputs", False)
+        if len(args) > 0 and isinstance(args[0], bool):
+            return_outputs = args[0]
+
+        sample_weight = inputs.pop("sample_weight", None)
+
+        if sample_weight is not None and (
+            self.finetuning_args.use_asft_loss or self.finetuning_args.use_dft_loss or self.finetuning_args.use_eaft_loss
+        ):
+            raise ValueError("`sample_weight` is currently incompatible with ASFT/DFT/EAFT losses.")
+
         if self.finetuning_args.use_asft_loss:
             with torch.no_grad():
                 ref_outputs = self.ref_model(
@@ -157,7 +210,17 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
                 )
                 ref_logits = ref_outputs.logits
             outputs = model(**inputs)
-            return self.compute_loss_func(outputs, inputs["labels"], ref_logits)
+            loss = self.compute_loss_func(outputs, inputs["labels"], ref_logits)
+            return (loss, outputs) if return_outputs else loss
+
+        if sample_weight is not None:
+            outputs = model(**inputs)
+            logits = outputs.get("logits") if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+            if logits is None:
+                raise ValueError("Cannot compute weighted SFT loss because model outputs do not contain `logits`.")
+
+            loss = self._compute_weighted_sft_loss(logits, inputs["labels"], sample_weight)
+            return (loss, outputs) if return_outputs else loss
         else:
             return super().compute_loss(model, inputs, *args, **kwargs)
 

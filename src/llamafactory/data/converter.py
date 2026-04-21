@@ -75,6 +75,28 @@ class DatasetConverter:
 
         return medias
 
+    def _parse_weight(self, example: dict[str, Any]) -> float:
+        r"""Parse sample-level loss weight from raw example."""
+        if self.dataset_attr.weight is None:
+            return 1.0
+
+        raw_weight = example.get(self.dataset_attr.weight, 1.0)
+        try:
+            weight = float(raw_weight)
+        except (TypeError, ValueError):
+            logger.warning_rank0_once(
+                f"Invalid sample weight `{raw_weight}` found in column `{self.dataset_attr.weight}`, fallback to 1.0."
+            )
+            return 1.0
+
+        if weight < 0:
+            logger.warning_rank0_once(
+                f"Negative sample weight `{weight}` found in column `{self.dataset_attr.weight}`, clip to 0.0."
+            )
+            return 0.0
+
+        return weight
+
     @abstractmethod
     def __call__(self, example: dict[str, Any]) -> dict[str, Any]:
         r"""Convert a single example in the dataset to the standard format."""
@@ -124,6 +146,7 @@ class AlpacaDatasetConverter(DatasetConverter):
             "_response": response,
             "_system": example[self.dataset_attr.system] if self.dataset_attr.system else "",
             "_tools": example[self.dataset_attr.tools] if self.dataset_attr.tools else "",
+            "_weight": self._parse_weight(example),
             "_images": self._find_medias(example[self.dataset_attr.images]) if self.dataset_attr.images else None,
             "_videos": self._find_medias(example[self.dataset_attr.videos]) if self.dataset_attr.videos else None,
             "_audios": self._find_medias(example[self.dataset_attr.audios]) if self.dataset_attr.audios else None,
@@ -220,6 +243,7 @@ class SharegptDatasetConverter(DatasetConverter):
             "_response": response,
             "_system": system,
             "_tools": example[self.dataset_attr.tools] if self.dataset_attr.tools else "",
+            "_weight": self._parse_weight(example),
             "_images": self._find_medias(example[self.dataset_attr.images]) if self.dataset_attr.images else None,
             "_videos": self._find_medias(example[self.dataset_attr.videos]) if self.dataset_attr.videos else None,
             "_audios": self._find_medias(example[self.dataset_attr.audios]) if self.dataset_attr.audios else None,
@@ -360,6 +384,7 @@ class OpenAIDatasetConverter(DatasetConverter):
             "_response": response,
             "_system": system,
             "_tools": tools,
+            "_weight": self._parse_weight(example),
             "_images": self._find_medias(example[self.dataset_attr.images]) if self.dataset_attr.images else None,
             "_videos": self._find_medias(example[self.dataset_attr.videos]) if self.dataset_attr.videos else None,
             "_audios": self._find_medias(example[self.dataset_attr.audios]) if self.dataset_attr.audios else None,

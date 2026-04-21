@@ -40,6 +40,7 @@ class DatasetAttr:
     # common columns
     system: str | None = None
     tools: str | None = None
+    weight: str | None = None
     images: str | None = None
     videos: str | None = None
     audios: str | None = None
@@ -78,7 +79,7 @@ class DatasetAttr:
         self.set_attr("num_samples", attr)
 
         if "columns" in attr:
-            column_names = ["prompt", "query", "response", "history", "messages", "system", "tools"]
+            column_names = ["prompt", "query", "response", "history", "messages", "system", "tools", "weight"]
             column_names += ["images", "videos", "audios", "chosen", "rejected", "kto_tag"]
             for column_name in column_names:
                 self.set_attr(column_name, attr["columns"])

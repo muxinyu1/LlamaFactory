@@ -304,11 +304,15 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, "torch.Tensor"]:
         batch_images, batch_videos, batch_audios = [], [], []
         batch_imglens, batch_vidlens, batch_audlens, batch_input_ids = [], [], [], []
+        has_sample_weight = any("sample_weight" in feature for feature in features)
+        batch_sample_weights: list[float] = []
         packing_params_list: list[dict[str, Any] | None] = []
         for feature in features:
             images = feature.pop("images", None) or []
             videos = feature.pop("videos", None) or []
             audios = feature.pop("audios", None) or []
+            if has_sample_weight:
+                batch_sample_weights.append(float(feature.pop("sample_weight", 1.0)))
             batch_images.extend(images)
             batch_videos.extend(videos)
             batch_audios.extend(audios)
@@ -454,7 +458,12 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
         if "image_bound" in features:  # for minicpmv inputs
             bsz, seq_length = features["input_ids"].shape
             features["position_ids"] = torch.arange(seq_length).long().repeat(bsz, 1)
+            if has_sample_weight:
+                features["sample_weight"] = torch.tensor(batch_sample_weights, dtype=torch.float32)
             return {"data": features, "input_ids": features["input_ids"], "labels": features["labels"]}
+
+        if has_sample_weight:
+            features["sample_weight"] = torch.tensor(batch_sample_weights, dtype=torch.float32)
 
         return features
 

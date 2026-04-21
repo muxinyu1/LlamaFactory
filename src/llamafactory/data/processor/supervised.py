@@ -29,6 +29,23 @@ logger = logging.get_logger(__name__)
 
 MAX_SU_SEQ_IDX = 2**32 # maximum sub-sequence index
 
+
+def _normalize_sample_weight(raw_weight: Any) -> float:
+    if raw_weight is None:
+        return 1.0
+
+    try:
+        weight = float(raw_weight)
+    except (TypeError, ValueError):
+        logger.warning_rank0_once(f"Invalid sample weight `{raw_weight}`, fallback to 1.0.")
+        return 1.0
+
+    if weight < 0:
+        logger.warning_rank0_once(f"Negative sample weight `{weight}`, clip to 0.0.")
+        return 0.0
+
+    return weight
+
 @dataclass
 class PackingParams:
     r"""Metadata for a packed sequence: sub-sequence boundaries and multimodal data indices.
@@ -128,6 +145,7 @@ class SupervisedDatasetProcessor(DatasetProcessor):
             model_inputs["images"].append(examples["_images"][i])
             model_inputs["videos"].append(examples["_videos"][i])
             model_inputs["audios"].append(examples["_audios"][i])
+            model_inputs["sample_weight"].append(_normalize_sample_weight(examples.get("_weight", [1.0])[i]))
 
         return model_inputs
 
@@ -146,6 +164,7 @@ class PackedSupervisedDatasetProcessor(SupervisedDatasetProcessor):
         # build inputs with format `<bos> X1 Y1 <eos> <bos> X2 Y2 <eos>`
         # and labels with format `<ignore> ... <ignore> Y1 <eos> <ignore> ... <ignore> Y2 <eos>`
         valid_num = 0
+        has_nontrivial_sample_weight = False
         batch_input_ids, batch_labels, batch_images, batch_videos, batch_audios = [], [], [], [], []
         lengths = []
         length2indexes = defaultdict(list)
@@ -169,6 +188,9 @@ class PackedSupervisedDatasetProcessor(SupervisedDatasetProcessor):
             if length > self.data_args.cutoff_len:
                 logger.warning_rank0(f"Dropped lengthy example with length {length} > {self.data_args.cutoff_len}.")
             else:
+                sample_weight = _normalize_sample_weight(examples.get("_weight", [1.0])[i])
+                if abs(sample_weight - 1.0) > 1e-8:
+                    has_nontrivial_sample_weight = True
                 lengths.append(length)
                 length2indexes[length].append(valid_num)
                 batch_input_ids.append(input_ids)
@@ -177,6 +199,12 @@ class PackedSupervisedDatasetProcessor(SupervisedDatasetProcessor):
                 batch_videos.append(examples["_videos"][i] or [])
                 batch_audios.append(examples["_audios"][i] or [])
                 valid_num += 1
+
+        if has_nontrivial_sample_weight:
+            raise ValueError(
+                "Weighted SFT dataset is not supported together with `packing=True` yet. "
+                "Please disable packing for weighted SFT."
+            )
 
         model_inputs = defaultdict(list)
         requires_packing_params = self.data_args.neat_packing
